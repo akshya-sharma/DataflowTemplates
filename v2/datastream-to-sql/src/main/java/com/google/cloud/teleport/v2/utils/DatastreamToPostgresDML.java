@@ -81,11 +81,32 @@ public class DatastreamToPostgresDML extends DatastreamToDML {
 
   @Override
   public String cleanDataTypeValueSql(
-      String columnValue, String columnName, Map<String, String> tableSchema) {
-    String dataType = tableSchema.get(columnName);
+      String columnValue, String columnName, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
+    DatastreamToDML.ColumnInfo columnInfo = tableSchema.get(columnName);
+
+    // If column information is not found, return the original value as a fallback.
+    if (columnInfo == null) {
+      return columnValue;
+    }
+
+    String dataType = columnInfo.getTypeName();
+    String isNullable = columnInfo.getIsNullable();
+
+    // Handle mandatory datetime types that are null or empty string
+    if (dataType != null &&
+        (dataType.toUpperCase().contains("TIMESTAMP") || dataType.toUpperCase().contains("DATE")) &&
+        "NO".equalsIgnoreCase(isNullable) &&
+        (columnValue == null || columnValue.isEmpty() || "''".equals(columnValue) || "null".equalsIgnoreCase(columnValue))) {
+      return "'0000-00-00 00:00:00'"; // Default value for mandatory null datetimes
+    }
+
+    // If dataType is null at this point (e.g. columnInfo.getTypeName() was null after all),
+    // returning columnValue is a safe default.
     if (dataType == null) {
       return columnValue;
     }
+
+    // Existing logic from DatastreamToPostgresDML.java for other types:
     switch (dataType.toUpperCase()) {
       case "INT2":
       case "INT4":
@@ -102,21 +123,32 @@ public class DatastreamToPostgresDML extends DatastreamToDML {
       case "SMALLSERIAL":
       case "SERIAL":
       case "BIGSERIAL":
-        if (columnValue.equals("") || columnValue.equals("''")) {
+        // If columnValue is effectively null for a numeric type, return SQL NULL
+        if (columnValue == null || columnValue.isEmpty() || "''".equals(columnValue) || "null".equalsIgnoreCase(columnValue)) {
           return getNullValueSql();
         }
-        break;
+        // Otherwise, return the numeric value as is (it should not be quoted)
+        return columnValue;
       case "INTERVAL":
         return convertJsonToPostgresInterval(columnValue, columnName);
       case "BYTEA":
+        if (columnValue == null || columnValue.isEmpty() || "''".equals(columnValue) || "null".equalsIgnoreCase(columnValue)) {
+          return getNullValueSql();
+        }
         // Byte arrays are converted to base64 string representation.
         return "decode(" + columnValue + ",'base64')";
+      // Add other specific type conversions from the original method if they existed.
     }
 
     // Arrays in Postgres are prefixed with underscore e.g. _INT4 for integer array.
     if (dataType.startsWith("_")) {
       return convertJsonToPostgresArray(columnValue, dataType.toUpperCase(), columnName);
     }
+
+    // Default fallback: return the original columnValue.
+    // Quoting for general string types is handled by the calling method (getValueSql)
+    // if columnValue was originally textual and isn't transformed into a direct SQL literal
+    // like NULL, a function call, or an unquoted numeric.
     return columnValue;
   }
 

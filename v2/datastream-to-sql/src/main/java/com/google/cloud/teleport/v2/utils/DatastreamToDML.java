@@ -48,9 +48,27 @@ public abstract class DatastreamToDML
 
   private static final Logger LOG = LoggerFactory.getLogger(DatastreamToDML.class);
 
+  public static class ColumnInfo {
+    public final String typeName;
+    public final String isNullable; // "YES", "NO", "" (empty string if unknown)
+
+    public ColumnInfo(String typeName, String isNullable) {
+      this.typeName = typeName;
+      this.isNullable = isNullable;
+    }
+
+    public String getTypeName() {
+      return typeName;
+    }
+
+    public String getIsNullable() {
+      return isNullable;
+    }
+  }
+
   private static String rowIdColumnName = "rowid";
   private static List<String> defaultPrimaryKeys;
-  private static MappedObjectCache<List<String>, Map<String, String>> tableCache;
+  private static MappedObjectCache<List<String>, Map<String, DatastreamToDML.ColumnInfo>> tableCache;
   private static MappedObjectCache<List<String>, List<String>> primaryKeyCache;
   private CdcJdbcIO.DataSourceConfiguration dataSourceConfiguration;
   private DataSource dataSource;
@@ -112,18 +130,17 @@ public abstract class DatastreamToDML
         LOG.debug("Skipping Null DmlInfo: {}", jsonString);
       }
     } catch (IOException e) {
-      // TODO(dhercher): Push failure to DLQ collection
+      // TODO: Push failure to DLQ collection
       LOG.error("IOException: {} :: {}", jsonString, e.toString());
     }
   }
 
   protected String cleanTableName(String tableName) {
-    return applyLowercase(tableName);
+    return applySchemaMap(tableName);
   }
 
   protected String cleanSchemaName(String schemaName) {
     schemaName = applySchemaMap(schemaName);
-    schemaName = applyLowercase(schemaName);
 
     return schemaName;
   }
@@ -164,7 +181,7 @@ public abstract class DatastreamToDML
     }
   }
 
-  public Map<String, String> getTableSchema(
+  public Map<String, DatastreamToDML.ColumnInfo> getTableSchema(
       String catalogName, String schemaName, String tableName) {
     List<String> searchKey = ImmutableList.of(catalogName, schemaName, tableName);
 
@@ -209,7 +226,7 @@ public abstract class DatastreamToDML
       String schemaName = this.getTargetSchemaName(row);
       String tableName = this.getTargetTableName(row);
 
-      Map<String, String> tableSchema = this.getTableSchema(catalogName, schemaName, tableName);
+      Map<String, DatastreamToDML.ColumnInfo> tableSchema = this.getTableSchema(catalogName, schemaName, tableName);
       if (tableSchema.isEmpty()) {
         // If the table DNE we return null (NOOP).
         return null;
@@ -265,7 +282,7 @@ public abstract class DatastreamToDML
       String schemaName,
       String tableName,
       List<String> primaryKeys,
-      Map<String, String> tableSchema) {
+      Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     Map<String, String> sqlTemplateValues = new HashMap<>();
 
     sqlTemplateValues.put("quoted_catalog_name", quote(catalogName));
@@ -281,23 +298,59 @@ public abstract class DatastreamToDML
     return sqlTemplateValues;
   }
 
-  public String getValueSql(JsonNode rowObj, String columnName, Map<String, String> tableSchema) {
-    String columnValue;
+  public String getValueSql(JsonNode rowObj, String columnName, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     JsonNode columnObj = rowObj.get(columnName);
-    if (columnObj == null) {
-      LOG.warn("Missing Required Value: {} in {}", columnName, rowObj.toString());
-      return "";
-    }
-    if (columnObj.isTextual()) {
-      columnValue = "\'" + cleanSql(columnObj.textValue()) + "\'";
+
+    String rawValue;
+    boolean isText;
+
+    // Handle JSON null immediately for all objects.
+    if (columnObj == null || columnObj.isNull()) {
+      // The type-specific cleaner will decide if a non-nullable column needs a default.
+      rawValue = null;
+      isText = false; // Treat as non-text to avoid quoting 'null' later.
     } else {
-      columnValue = columnObj.toString();
+      isText = columnObj.isTextual();
+      if (isText) {
+        rawValue = columnObj.textValue();
+      } else {
+        rawValue = columnObj.toString(); // For numbers, booleans etc.
+      }
     }
-    return cleanDataTypeValueSql(columnValue, columnName, tableSchema);
+    
+    // Pass the raw, unquoted value to the type-specific cleaner
+    String cleanedValue = cleanDataTypeValueSql(rawValue, columnName, tableSchema);
+
+    // If the cleaner returns null, it means we should use the SQL NULL value.
+    if (cleanedValue == null) {
+      return getNullValueSql();
+    }
+
+    // Check if cleanedValue is a special SQL form/function that shouldn't be quoted
+    if (cleanedValue.equalsIgnoreCase("NULL") // cleaner might return "NULL" for empty strings etc.
+        || cleanedValue.startsWith("UNHEX(")
+        || cleanedValue.startsWith("X'")
+        /* add other function calls or special values here if needed */) {
+      return cleanedValue;
+    }
+
+    // If it was originally a text node and not a special SQL form, then quote it.
+    // Non-textual nodes (numbers, booleans) are already valid SQL literals via rawValue/cleanedValue.
+    if (isText) {
+      return "'" + cleanSql(cleanedValue) + "'";
+    } else {
+        // For numbers, booleans, if cleanDataTypeValueSql didn't change them,
+        // they are already in a form that doesn't need quoting.
+        // If it did change them (e.g. number to string), it should be a special form
+        // or handled by cleanDataTypeValueSql to return a string that might need quoting (covered by isText).
+        return cleanedValue;
+    }
   }
 
   public String cleanDataTypeValueSql(
-      String columnValue, String columnName, Map<String, String> tableSchema) {
+      String columnValue, String columnName, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
+    // This method is intended to be overridden by database-specific DML generators.
+    // The base implementation returns the value as-is.
     return columnValue;
   }
 
@@ -319,7 +372,7 @@ public abstract class DatastreamToDML
   }
 
   public List<String> getFieldValues(
-      JsonNode rowObj, List<String> fieldNames, Map<String, String> tableSchema) {
+      JsonNode rowObj, List<String> fieldNames, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     List<String> fieldValues = new ArrayList<String>();
 
     for (String fieldName : fieldNames) {
@@ -329,7 +382,7 @@ public abstract class DatastreamToDML
     return fieldValues;
   }
 
-  public String getColumnsListSql(JsonNode rowObj, Map<String, String> tableSchema) {
+  public String getColumnsListSql(JsonNode rowObj, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     String columnsListSql = "";
 
     for (Iterator<String> fieldNames = rowObj.fieldNames(); fieldNames.hasNext(); ) {
@@ -350,7 +403,7 @@ public abstract class DatastreamToDML
     return columnsListSql;
   }
 
-  public String getColumnsValuesSql(JsonNode rowObj, Map<String, String> tableSchema) {
+  public String getColumnsValuesSql(JsonNode rowObj, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     String valuesInsertSql = "";
 
     for (Iterator<String> fieldNames = rowObj.fieldNames(); fieldNames.hasNext(); ) {
@@ -370,7 +423,7 @@ public abstract class DatastreamToDML
     return valuesInsertSql;
   }
 
-  public String getColumnsUpdateSql(JsonNode rowObj, Map<String, String> tableSchema) {
+  public String getColumnsUpdateSql(JsonNode rowObj, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     String onUpdateSql = "";
     for (Iterator<String> fieldNames = rowObj.fieldNames(); fieldNames.hasNext(); ) {
       String columnName = fieldNames.next();
@@ -392,7 +445,7 @@ public abstract class DatastreamToDML
   }
 
   public String getPrimaryKeyToValueFilterSql(
-      JsonNode rowObj, List<String> primaryKeys, Map<String, String> tableSchema) {
+      JsonNode rowObj, List<String> primaryKeys, Map<String, DatastreamToDML.ColumnInfo> tableSchema) {
     String pkToValueSql = "";
 
     for (String columnName : primaryKeys) {
@@ -445,7 +498,8 @@ public abstract class DatastreamToDML
    * thread-safe behaviors? Currently, it does not since there is no iteration and get/set are not
    * continuous.
    */
-  public static class JdbcTableCache extends MappedObjectCache<List<String>, Map<String, String>> {
+  public static class JdbcTableCache
+      extends MappedObjectCache<List<String>, Map<String, DatastreamToDML.ColumnInfo>> {
 
     private DataSource dataSource;
     private static final int MAX_RETRIES = 5;
@@ -459,15 +513,19 @@ public abstract class DatastreamToDML
       this.dataSource = dataSource;
     }
 
-    private Map<String, String> getTableSchema(
+    private Map<String, DatastreamToDML.ColumnInfo> getTableSchema(
         String catalogName, String schemaName, String tableName, int retriesRemaining) {
-      Map<String, String> tableSchema = new HashMap<String, String>();
+      Map<String, DatastreamToDML.ColumnInfo> tableSchema = new HashMap<>(); // Changed type here
 
       try (Connection connection = getConnection(this.dataSource, MAX_RETRIES, MAX_RETRIES)) {
         DatabaseMetaData metaData = connection.getMetaData();
         try (ResultSet columns = metaData.getColumns(catalogName, schemaName, tableName, null)) {
+
           while (columns.next()) {
-            tableSchema.put(columns.getString("COLUMN_NAME"), columns.getString("TYPE_NAME"));
+            String columnName = columns.getString("COLUMN_NAME");
+            String typeName = columns.getString("TYPE_NAME");
+            String isNullable = columns.getString("IS_NULLABLE"); // "YES", "NO", or ""
+            tableSchema.put(columnName, new DatastreamToDML.ColumnInfo(typeName, isNullable)); // Store ColumnInfo
           }
         }
       } catch (SQLException e) {
@@ -504,15 +562,16 @@ public abstract class DatastreamToDML
     }
 
     @Override
-    public Map<String, String> getObjectValue(List<String> key) {
+    public Map<String, DatastreamToDML.ColumnInfo> getObjectValue(List<String> key) { // Changed return type
       String catalogName = key.get(0);
       String schemaName = key.get(1);
       String tableName = key.get(2);
 
-      Map<String, String> tableSchema =
+      // Call the modified getTableSchema
+      Map<String, DatastreamToDML.ColumnInfo> tableSchema =
           getTableSchema(catalogName, schemaName, tableName, MAX_RETRIES);
 
-      return tableSchema;
+      return tableSchema; // Return Map<String, ColumnInfo>
     }
   }
 

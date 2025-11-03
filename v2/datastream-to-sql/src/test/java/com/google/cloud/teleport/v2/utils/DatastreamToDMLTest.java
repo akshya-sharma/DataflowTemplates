@@ -64,21 +64,21 @@ public class DatastreamToDMLTest {
     String expectedTextContent = "'value'";
     String testSqlContent =
         DatastreamToPostgresDML.of(null)
-            .getValueSql(rowObj, "text_column", new HashMap<String, String>());
+            .getValueSql(rowObj, "text_column", new HashMap<String, DatastreamToDML.ColumnInfo>());
     assertEquals(expectedTextContent, testSqlContent);
 
     // Single quotes are escaped by 2 single quotes in SQL
     String expectedQuotedTextContent = "'Test Values: ''!@#$%^'";
     String testQuotedSqlContent =
         DatastreamToPostgresDML.of(null)
-            .getValueSql(rowObj, "quoted_text_column", new HashMap<String, String>());
+            .getValueSql(rowObj, "quoted_text_column", new HashMap<String, DatastreamToDML.ColumnInfo>());
     assertEquals(expectedQuotedTextContent, testQuotedSqlContent);
 
     // Null bytes are escaped with blanks values
     String expectedNullByteTextContent = "'Test Values: Hes made'";
     String testNullByteSqlContent =
         DatastreamToPostgresDML.of(null)
-            .getValueSql(rowObj, "null_byte_text_column", new HashMap<String, String>());
+            .getValueSql(rowObj, "null_byte_text_column", new HashMap<String, DatastreamToDML.ColumnInfo>());
     assertEquals(expectedNullByteTextContent, testNullByteSqlContent);
   }
 
@@ -95,7 +95,7 @@ public class DatastreamToDMLTest {
             + "  {\"nestedArray\": null, \"elementValue\": 456}"
             + "], \"elementValue\": null}}";
     JsonNode rowObj = this.getRowObj(arrayJson);
-    Map<String, String> tableSchema = new HashMap<>();
+    Map<String, DatastreamToDML.ColumnInfo> tableSchema = new HashMap<>();
     tableSchema.put("number_array", "_int4");
     DatastreamToPostgresDML dml = DatastreamToPostgresDML.of(null);
     String expectedInt = "ARRAY[NULL,456]";

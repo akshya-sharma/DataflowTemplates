@@ -15,6 +15,9 @@
  */
 package com.google.cloud.teleport.v2.templates;
 
+import com.google.cloud.secretmanager.v1.AccessSecretVersionResponse;
+import com.google.cloud.secretmanager.v1.SecretManagerServiceClient;
+import com.google.cloud.secretmanager.v1.SecretVersionName;
 import com.google.cloud.teleport.metadata.Template;
 import com.google.cloud.teleport.metadata.TemplateCategory;
 import com.google.cloud.teleport.metadata.TemplateParameter;
@@ -28,6 +31,7 @@ import com.google.cloud.teleport.v2.transforms.CreateDml;
 import com.google.cloud.teleport.v2.transforms.ProcessDml;
 import com.google.cloud.teleport.v2.values.FailsafeElement;
 import com.google.common.base.Splitter;
+import java.io.IOException;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
@@ -209,6 +213,7 @@ public class DataStreamToSQL {
 
     @TemplateParameter.Password(
         order = 11,
+        optional = true,
         description = "Database Password for given user.",
         helpText = "The password for the SQL user.")
     String getDatabasePassword();
@@ -216,7 +221,16 @@ public class DataStreamToSQL {
     void setDatabasePassword(String value);
 
     @TemplateParameter.Text(
-        order = 12,
+        order = 12, // Assigned new order
+        optional = true,
+        groupName = "Target",
+        description = "Database Password Secret ID.",
+        helpText = "The Secret Manager secret ID for the database password. Format: projects/{project}/secrets/{secret}/versions/{version}")
+    String getDatabasePasswordSecretId();
+    void setDatabasePasswordSecretId(String value);
+
+    @TemplateParameter.Text(
+        order = 13, // Incremented order
         groupName = "Target",
         optional = true,
         description = "SQL Database Name.",
@@ -227,19 +241,18 @@ public class DataStreamToSQL {
     void setDatabaseName(String value);
 
     @TemplateParameter.Text(
-        order = 13,
+        order = 14, // Incremented order
         optional = true,
-        description = "A map of key/values used to dictate schema name changes",
+        description = "A map of key/values used to dictate schema and table name changes.",
         helpText =
-            "A map of key/values used to dictate schema name changes (ie."
-                + " old_name:new_name,CaseError:case_error)")
+            "A map of key/values used to dictate schema and table name changes (e.g., `oldschema:newschema`, `internaltable:ActualTable`). This can be used to correct casing issues if the pipeline internally uses a different casing than the target database.")
     @Default.String("")
     String getSchemaMap();
 
     void setSchemaMap(String value);
 
     @TemplateParameter.Text(
-        order = 14,
+        order = 15, // Incremented order
         groupName = "Target",
         optional = true,
         description = "Custom connection string.",
@@ -276,6 +289,19 @@ public class DataStreamToSQL {
   public static CdcJdbcIO.DataSourceConfiguration getDataSourceConfiguration(Options options) {
     String jdbcDriverName;
     String jdbcDriverConnectionString;
+    String password = options.getDatabasePassword(); // Default to provided password
+
+    if (options.getDatabasePasswordSecretId() != null
+        && !options.getDatabasePasswordSecretId().isEmpty()) {
+      try (SecretManagerServiceClient client = SecretManagerServiceClient.create()) {
+        SecretVersionName secretVersionName = SecretVersionName.parse(options.getDatabasePasswordSecretId());
+        AccessSecretVersionResponse response = client.accessSecretVersion(secretVersionName);
+        password = response.getPayload().getData().toStringUtf8();
+      } catch (IOException e) {
+        LOG.error("Failed to retrieve password from Secret Manager: {}", e.getMessage(), e);
+        throw new RuntimeException("Failed to retrieve password from Secret Manager.", e);
+      }
+    }
 
     switch (options.getDatabaseType()) {
       case "postgres":
@@ -303,7 +329,7 @@ public class DataStreamToSQL {
     CdcJdbcIO.DataSourceConfiguration dataSourceConfiguration =
         CdcJdbcIO.DataSourceConfiguration.create(jdbcDriverName, jdbcDriverConnectionString)
             .withUsername(options.getDatabaseUser())
-            .withPassword(options.getDatabasePassword())
+            .withPassword(password) // Use the potentially updated password
             .withMaxIdleConnections(new Integer(0));
 
     return dataSourceConfiguration;
@@ -370,7 +396,7 @@ public class DataStreamToSQL {
                     options.getInputFileFormat(),
                     options.getGcsPubSubSubscription(),
                     options.getRfcStartDateTime())
-                .withLowercaseSourceColumns()
+                //.withLowercaseSourceColumns()
                 .withRenameColumnValue("_metadata_row_id", "rowid")
                 .withHashRowId());
 
