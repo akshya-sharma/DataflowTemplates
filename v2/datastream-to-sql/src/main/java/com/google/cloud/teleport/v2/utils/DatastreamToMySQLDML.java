@@ -245,6 +245,7 @@ public class DatastreamToMySQLDML extends DatastreamToDML {
         try {
           switch (columnType) {
             case "DATETIME":
+            case "TIMESTAMP":
               // OffsetDateTime can parse various ISO 8601 formats, including those with 'Z'
               // or offsets
               OffsetDateTime odt = OffsetDateTime.parse(innerValue);
