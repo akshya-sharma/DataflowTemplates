@@ -132,12 +132,12 @@ public class DatastreamToMySQLDML extends DatastreamToDML {
     switch (upperDataType) {
       case "DATE":
       case "DATETIME":
+      case "TIMESTAMP": // Timestamp specific handling from original code
         // Apply handling for DATETIME/DATE datatype as these require transformation
         // before inserting to MySQL.
         // The mandatory null check is done above. If it passes, it means the value is not null,
         // or it's nullable, or not a datetime type.
-        return convertJsonToMysqlDatetime(columnValue, columnName, upperDataType);
-      case "TIMESTAMP": // Timestamp specific handling from original code
+        return convertJsonToMysqlDatetime(columnValue, columnName, upperDataType);      
       case "TIME":
         // The generic null check at the top handles null values.
         return columnValue;
